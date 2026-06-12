@@ -61,6 +61,40 @@ npm run start
 
 The server listens on `http://0.0.0.0:11434` by default (the standard Ollama port).
 
+### Alternative: run with Docker
+
+Build and run directly after checkout (works on the Pi — the base image is multi-arch):
+
+```bash
+docker build -t hailo-node .
+
+# --network host lets the container reach hailort_server on localhost:12145
+# and exposes the API on port 11434 directly
+docker run -d --name hailo-node --restart unless-stopped \
+  --network host \
+  hailo-node
+```
+
+Configuration is passed as environment variables (same names as `.env`), e.g.:
+
+```bash
+docker run -d --name hailo-node --restart unless-stopped \
+  --network host \
+  -e SYSTEM_PROMPT="You are a pirate." \
+  -e API_KEY="change-me" \
+  hailo-node
+```
+
+If you prefer not to use host networking, publish the port and point the
+container at the Pi's address instead:
+
+```bash
+docker run -d --name hailo-node --restart unless-stopped \
+  -p 11434:11434 \
+  -e LLM_HOSTNAME="jarvis.local" \
+  hailo-node
+```
+
 ### 5. Test it
 
 ```bash
