@@ -9,6 +9,11 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 
+// Largest reply frame we accept from the server. Replies are small protobuf
+// messages (tokens, params, status), so anything bigger means a corrupt or
+// hostile peer — refuse rather than buffer unbounded data.
+const MAX_FRAME_SIZE = 64 * 1024 * 1024;
+
 /**
  * Low-level TCP connection to a HailoRT GenAI server.
  *
@@ -82,6 +87,12 @@ export class HailoConnection {
     const payloadSize = readLengthPrefix(sizeBytes);
     if (payloadSize === 0) {
       return Buffer.alloc(0);
+    }
+    if (payloadSize > MAX_FRAME_SIZE) {
+      await this.close();
+      throw new Error(
+        `Frame size ${payloadSize} exceeds maximum ${MAX_FRAME_SIZE}`,
+      );
     }
     return this.readExact(payloadSize, timeoutMs);
   }

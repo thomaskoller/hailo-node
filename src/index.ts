@@ -6,4 +6,4 @@ export { HailoConnection } from "./connection";
 export { createApp } from "./routes";
 export { loadConfig } from "./config";
 export type { ServerConfig } from "./config";
-export { Mutex } from "./mutex";
+export { Mutex, MutexQueueFullError } from "./mutex";

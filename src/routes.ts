@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
+import { bodyLimit } from "hono/body-limit";
+import { bearerAuth } from "hono/bearer-auth";
 import { HailoLLM, type Message, type LLMGeneratorParams } from "./llm";
 import type { ServerConfig } from "./config";
 import type { Mutex } from "./mutex";
@@ -11,36 +13,79 @@ interface ChatMessage {
 
 interface ChatRequest {
   model?: string;
-  messages: ChatMessage[];
+  messages?: unknown;
   stream?: boolean;
   options?: Record<string, unknown>;
 }
 
 interface GenerateRequest {
   model?: string;
-  prompt: string;
-  system?: string;
+  prompt?: unknown;
+  system?: unknown;
   stream?: boolean;
   options?: Record<string, unknown>;
+}
+
+const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_GENERATED_TOKENS = 4096;
+const VALID_ROLES = new Set(["system", "user", "assistant"]);
+
+// ChatML control tokens. The prompt is assembled by interpolating message
+// content between <|im_start|>/<|im_end|> markers, so any of these tokens in
+// client-supplied text would let the client forge system messages.
+const CONTROL_TOKEN_RE = /<\|(?:im_start|im_end|endoftext)\|>/g;
+
+function sanitizeContent(text: string): string {
+  return text.replace(CONTROL_TOKEN_RE, "");
+}
+
+function validateMessages(value: unknown): ChatMessage[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const out: ChatMessage[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) return null;
+    const { role, content } = item as Record<string, unknown>;
+    if (typeof role !== "string" || !VALID_ROLES.has(role)) return null;
+    if (typeof content !== "string") return null;
+    out.push({
+      role: role as ChatMessage["role"],
+      content: sanitizeContent(content),
+    });
+  }
+  return out;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function mapOptions(
   options: Record<string, unknown> | undefined,
 ): Partial<LLMGeneratorParams> {
-  if (!options) return {};
+  if (!options || typeof options !== "object") return {};
   const mapped: Partial<LLMGeneratorParams> = {};
   if (typeof options.temperature === "number")
-    mapped.temperature = options.temperature;
-  if (typeof options.top_p === "number") mapped.topP = options.top_p;
-  if (typeof options.top_k === "number") mapped.topK = options.top_k;
+    mapped.temperature = clamp(options.temperature, 0, 2);
+  if (typeof options.top_p === "number")
+    mapped.topP = clamp(options.top_p, 0, 1);
+  if (typeof options.top_k === "number")
+    mapped.topK = clamp(Math.floor(options.top_k), 1, 1000);
   if (typeof options.num_predict === "number" && options.num_predict > 0)
-    mapped.maxGeneratedTokens = options.num_predict;
-  if (typeof options.seed === "number" && options.seed !== 0)
+    mapped.maxGeneratedTokens = clamp(
+      Math.floor(options.num_predict),
+      1,
+      MAX_GENERATED_TOKENS,
+    );
+  if (
+    typeof options.seed === "number" &&
+    Number.isFinite(options.seed) &&
+    options.seed !== 0
+  )
     mapped.seed = options.seed;
   if (typeof options.frequency_penalty === "number")
-    mapped.frequencyPenalty = options.frequency_penalty;
+    mapped.frequencyPenalty = clamp(options.frequency_penalty, -2, 2);
   if (typeof options.repeat_penalty === "number")
-    mapped.frequencyPenalty = options.repeat_penalty;
+    mapped.frequencyPenalty = clamp(options.repeat_penalty, -2, 2);
   return mapped;
 }
 
@@ -80,6 +125,19 @@ export function createApp(
 ): Hono {
   const app = new Hono();
 
+  app.use("/api/*", bodyLimit({ maxSize: MAX_BODY_BYTES }));
+  if (config.apiKey) {
+    app.use("/api/*", bearerAuth({ token: config.apiKey }));
+  }
+
+  const acquireOrBusy = async (): Promise<(() => void) | null> => {
+    try {
+      return await mutex.acquire();
+    } catch {
+      return null;
+    }
+  };
+
   // GET / — Ollama health check (clients probe this first)
   app.get("/", (c) => {
     return c.text("Ollama is running");
@@ -92,20 +150,36 @@ export function createApp(
 
   // POST /api/chat
   app.post("/api/chat", async (c) => {
-    const body = (await c.req.json()) as ChatRequest;
-    const msg = body.messages;
-    console.log(msg.length);
-    console.log(msg[msg.length - 1]);
-    const messages = prependSystemPrompt(body.messages, config);
+    let body: ChatRequest;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const validated = validateMessages(body.messages);
+    if (!validated) {
+      return c.json(
+        {
+          error:
+            "messages must be a non-empty array of {role, content} with role one of system|user|assistant and string content",
+        },
+        400,
+      );
+    }
+    const messages = prependSystemPrompt(validated, config);
     const params = mapOptions(body.options);
     const model = config.modelDisplayName;
     const shouldStream = body.stream !== false;
+
+    const release = await acquireOrBusy();
+    if (!release) {
+      return c.json({ error: "server busy, try again later" }, 503);
+    }
 
     if (shouldStream) {
       return stream(c, async (s) => {
         c.header("Content-Type", "application/x-ndjson");
 
-        const release = await mutex.acquire();
         const startTime = Date.now();
         let tokenCount = 0;
         let aborted = false;
@@ -147,13 +221,14 @@ export function createApp(
     }
 
     // Non-streaming
-    const release = await mutex.acquire();
+    const signal = c.req.raw.signal;
     const startTime = Date.now();
     let fullContent = "";
     let tokenCount = 0;
 
     try {
       for await (const token of llm.generate(messages, params)) {
+        if (signal.aborted) break;
         fullContent += token;
         if (containsStopSequence(fullContent)) {
           fullContent = trimAtStopSequence(fullContent);
@@ -178,22 +253,41 @@ export function createApp(
 
   // POST /api/generate
   app.post("/api/generate", async (c) => {
-    const body = (await c.req.json()) as GenerateRequest;
+    let body: GenerateRequest;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    if (typeof body.prompt !== "string" || body.prompt.length === 0) {
+      return c.json({ error: "prompt must be a non-empty string" }, 400);
+    }
+    if (body.system !== undefined && typeof body.system !== "string") {
+      return c.json({ error: "system must be a string" }, 400);
+    }
+
     const messages: Message[] = [];
-    const systemContent = body.system ?? config.systemPrompt;
+    const systemContent =
+      body.system !== undefined
+        ? sanitizeContent(body.system)
+        : config.systemPrompt;
     if (systemContent) {
       messages.push({ role: "system", content: systemContent });
     }
-    messages.push({ role: "user", content: body.prompt });
+    messages.push({ role: "user", content: sanitizeContent(body.prompt) });
     const params = mapOptions(body.options);
     const model = config.modelDisplayName;
     const shouldStream = body.stream !== false;
+
+    const release = await acquireOrBusy();
+    if (!release) {
+      return c.json({ error: "server busy, try again later" }, 503);
+    }
 
     if (shouldStream) {
       return stream(c, async (s) => {
         c.header("Content-Type", "application/x-ndjson");
 
-        const release = await mutex.acquire();
         const startTime = Date.now();
         let tokenCount = 0;
         let aborted = false;
@@ -235,13 +329,14 @@ export function createApp(
     }
 
     // Non-streaming
-    const release = await mutex.acquire();
+    const signal = c.req.raw.signal;
     const startTime = Date.now();
     let fullResponse = "";
     let tokenCount = 0;
 
     try {
       for await (const token of llm.generate(messages, params)) {
+        if (signal.aborted) break;
         fullResponse += token;
         if (containsStopSequence(fullResponse)) {
           fullResponse = trimAtStopSequence(fullResponse);
@@ -295,7 +390,12 @@ export function createApp(
   // POST /api/show
   app.post("/api/show", async (c) => {
     const body = await c.req.json().catch(() => ({}));
-    const name = body.name ?? body.model ?? config.modelDisplayName;
+    const name =
+      typeof body.name === "string"
+        ? body.name
+        : typeof body.model === "string"
+          ? body.model
+          : config.modelDisplayName;
     return c.json({
       name,
       model: name,
