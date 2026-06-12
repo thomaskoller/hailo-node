@@ -61,6 +61,40 @@ npm run start
 
 The server listens on `http://0.0.0.0:11434` by default (the standard Ollama port).
 
+### Alternative: run with Docker
+
+Build and run directly after checkout (works on the Pi — the base image is multi-arch):
+
+```bash
+docker build -t hailo-node .
+
+# --network host lets the container reach hailort_server on localhost:12145
+# and exposes the API on port 11434 directly
+docker run -d --name hailo-node --restart unless-stopped \
+  --network host \
+  hailo-node
+```
+
+Configuration is passed as environment variables (same names as `.env`), e.g.:
+
+```bash
+docker run -d --name hailo-node --restart unless-stopped \
+  --network host \
+  -e SYSTEM_PROMPT="You are a pirate." \
+  -e API_KEY="change-me" \
+  hailo-node
+```
+
+If you prefer not to use host networking, publish the port and point the
+container at the Pi's address instead:
+
+```bash
+docker run -d --name hailo-node --restart unless-stopped \
+  -p 11434:11434 \
+  -e LLM_HOSTNAME="jarvis.local" \
+  hailo-node
+```
+
 ### 5. Test it
 
 ```bash
@@ -177,10 +211,23 @@ All settings are read from environment variables (loaded from `.env`):
 | `LLM_PORT_NUMBER`    | `12145`                                                    | Hailo RPC server port    |
 | `HEF_LIBRARY_PATH`   | `/usr/local/hailo/resources/models/hailo10h/`              | HEF directory on server  |
 | `HEF_DEFAULT_MODEL`  | `Qwen2.5-1.5B-Instruct.hef`                               | HEF model filename       |
+| `API_KEY`            | _(unset)_                                                  | If set, `/api/*` requires `Authorization: Bearer <API_KEY>` |
+| `MAX_QUEUED_REQUESTS`| `32`                                                       | Max requests waiting for the device before returning 503 |
 
 ### Concurrency
 
-The Hailo TCP connection is single-threaded. Concurrent HTTP requests are serialized via an internal mutex (FIFO queue), not rejected. Requests wait their turn rather than returning 503.
+The Hailo TCP connection is single-threaded. Concurrent HTTP requests are serialized via an internal mutex (FIFO queue). Up to `MAX_QUEUED_REQUESTS` requests wait their turn; beyond that the server returns HTTP 503.
+
+### Security
+
+The server is designed for use on a **trusted local network** — it listens on `0.0.0.0` by default and has no TLS. Hardening that is in place:
+
+- Request bodies are validated (roles, content types) and limited to 1 MB; malformed requests get HTTP 400.
+- ChatML control tokens (`<|im_start|>`, `<|im_end|>`, `<|endoftext|>`) are stripped from client-supplied content so clients can't forge system messages past the configured `SYSTEM_PROMPT`.
+- Generation options are clamped to sane ranges (`num_predict` ≤ 4096, etc.).
+- Set `API_KEY` to require a bearer token on `/api/*` if you don't trust every device on your LAN.
+
+Do **not** expose the port to the internet (router port-forwarding, etc.) without putting a TLS reverse proxy and authentication in front of it.
 
 ## Usage
 

@@ -6,7 +6,7 @@ import { createApp } from "./routes";
 
 async function main() {
   const config = loadConfig();
-  const mutex = new Mutex();
+  const mutex = new Mutex(config.maxQueuedRequests);
 
   console.log(
     `Connecting to HailoRT LLM server at ${config.llmHostname}:${config.llmPort}...`
@@ -37,6 +37,11 @@ async function main() {
       );
       console.log(`Model: ${config.modelDisplayName}`);
       console.log(`System prompt: ${config.systemPrompt}`);
+      console.log(
+        config.apiKey
+          ? "API key auth: enabled (Authorization: Bearer <API_KEY>)"
+          : "API key auth: disabled (set API_KEY to require a bearer token)"
+      );
     }
   );
 

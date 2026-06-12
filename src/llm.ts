@@ -1,4 +1,5 @@
 import * as protobuf from "protobufjs";
+import * as fs from "fs";
 import * as path from "path";
 import { HailoConnection } from "./connection";
 import { HailoGenAIActionID, packPayload, unpackPayload } from "./protocol";
@@ -47,9 +48,19 @@ let protoRoot: protobuf.Root | null = null;
 
 function getProtoRoot(): protobuf.Root {
   if (!protoRoot) {
-    protoRoot = protobuf.loadSync(
-      path.resolve(__dirname, "..", "proto", "genai_scheme.proto")
-    );
+    // src/llm.ts sits one level below the package root; the compiled
+    // dist/src/llm.js sits two levels below it.
+    const candidates = [
+      path.resolve(__dirname, "..", "proto", "genai_scheme.proto"),
+      path.resolve(__dirname, "..", "..", "proto", "genai_scheme.proto"),
+    ];
+    const protoPath = candidates.find((p) => fs.existsSync(p));
+    if (!protoPath) {
+      throw new Error(
+        `genai_scheme.proto not found (looked in: ${candidates.join(", ")})`
+      );
+    }
+    protoRoot = protobuf.loadSync(protoPath);
   }
   return protoRoot;
 }

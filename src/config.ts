@@ -7,6 +7,15 @@ export interface ServerConfig {
   llmHostname: string;
   llmPort: number;
   hefPath: string;
+  /** If non-empty, /api/* requires `Authorization: Bearer <apiKey>` */
+  apiKey: string;
+  /** Maximum requests allowed to wait for the device mutex */
+  maxQueuedRequests: number;
+}
+
+function parsePort(value: string | undefined, fallback: number): number {
+  const port = parseInt(value ?? "", 10);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
 }
 
 export function loadConfig(): ServerConfig {
@@ -17,7 +26,7 @@ export function loadConfig(): ServerConfig {
     process.env.HEF_DEFAULT_MODEL ?? "Qwen2.5-1.5B-Instruct.hef";
 
   return {
-    serverPort: parseInt(process.env.SERVER_PORT ?? "11434", 10),
+    serverPort: parsePort(process.env.SERVER_PORT, 11434),
     serverHost: process.env.SERVER_HOST ?? "0.0.0.0",
     systemPrompt:
       process.env.SYSTEM_PROMPT ??
@@ -25,7 +34,9 @@ export function loadConfig(): ServerConfig {
     language: process.env.LANGUAGE ?? "en",
     modelDisplayName: process.env.MODEL_DISPLAY_NAME ?? "qwen2.5:1.5b",
     llmHostname: process.env.LLM_HOSTNAME ?? "localhost",
-    llmPort: parseInt(process.env.LLM_PORT_NUMBER ?? "12145", 10),
+    llmPort: parsePort(process.env.LLM_PORT_NUMBER, 12145),
     hefPath: `${hefLibraryPath}${hefDefaultModel}`,
+    apiKey: process.env.API_KEY ?? "",
+    maxQueuedRequests: parseInt(process.env.MAX_QUEUED_REQUESTS ?? "32", 10),
   };
 }
